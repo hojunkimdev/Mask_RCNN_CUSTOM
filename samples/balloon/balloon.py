@@ -33,6 +33,10 @@ import json
 import datetime
 import numpy as np
 import skimage.draw
+import glob
+import cv2
+import time
+from mrcnn import visualize
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -59,11 +63,11 @@ class BalloonConfig(Config):
     Derives from the base Config class and overrides some values.
     """
     # Give the configuration a recognizable name
-    NAME = "balloon"
+    NAME = "custom"
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
-    IMAGES_PER_GPU = 2
+    IMAGES_PER_GPU = 1
 
     # Number of classes (including background)
     NUM_CLASSES = 1 + 1  # Background + balloon
@@ -73,6 +77,13 @@ class BalloonConfig(Config):
 
     # Skip detections with < 90% confidence
     DETECTION_MIN_CONFIDENCE = 0.9
+
+
+class InferenceConfig(BalloonConfig):
+    # Set batch size to 1 since we'll be running inference on
+    # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
+    GPU_COUNT = 1
+    IMAGES_PER_GPU = 4
 
 
 ############################################################
@@ -87,10 +98,10 @@ class BalloonDataset(utils.Dataset):
         subset: Subset to load: train or val
         """
         # Add classes. We have only one class to add.
-        self.add_class("balloon", 1, "balloon")
+        self.add_class("custom", 1, "defect")
 
         # Train or validation dataset?
-        assert subset in ["train", "val"]
+        assert subset in ["train", "val", "test_crop"]
         dataset_dir = os.path.join(dataset_dir, subset)
 
         # Load annotations
@@ -109,7 +120,7 @@ class BalloonDataset(utils.Dataset):
         # }
         # We mostly care about the x and y coordinates of each region
         # Note: In VIA 2.0, regions was changed from a dict to a list.
-        annotations = json.load(open(os.path.join(dataset_dir, "via_region_data.json")))
+        annotations = json.load(open(os.path.join(dataset_dir, "via_export_json.json")))
         annotations = list(annotations.values())  # don't need the dict keys
 
         # The VIA tool saves images in the JSON even if they don't have any
@@ -123,9 +134,9 @@ class BalloonDataset(utils.Dataset):
             # shape_attributes (see json format above)
             # The if condition is needed to support VIA versions 1.x and 2.x.
             if type(a['regions']) is dict:
-                polygons = [r['shape_attributes'] for r in a['regions'].values()]
+                shape_attributes = [r['shape_attributes'] for r in a['regions'].values()]
             else:
-                polygons = [r['shape_attributes'] for r in a['regions']] 
+                shape_attributes = [r['shape_attributes'] for r in a['regions']]
 
             # load_mask() needs the image size to convert polygons to masks.
             # Unfortunately, VIA doesn't include it in JSON, so we must read
@@ -135,11 +146,11 @@ class BalloonDataset(utils.Dataset):
             height, width = image.shape[:2]
 
             self.add_image(
-                "balloon",
+                "custom",
                 image_id=a['filename'],  # use file name as a unique image id
                 path=image_path,
                 width=width, height=height,
-                polygons=polygons)
+                shape_attributes=shape_attributes)
 
     def load_mask(self, image_id):
         """Generate instance masks for an image.
@@ -150,17 +161,26 @@ class BalloonDataset(utils.Dataset):
         """
         # If not a balloon dataset image, delegate to parent class.
         image_info = self.image_info[image_id]
-        if image_info["source"] != "balloon":
+        if image_info["source"] != "custom":
             return super(self.__class__, self).load_mask(image_id)
 
         # Convert polygons to a bitmap mask of shape
         # [height, width, instance_count]
         info = self.image_info[image_id]
-        mask = np.zeros([info["height"], info["width"], len(info["polygons"])],
+        mask = np.zeros([info["height"], info["width"], len(info["shape_attributes"])],
                         dtype=np.uint8)
-        for i, p in enumerate(info["polygons"]):
+
+        # # polygons
+        # for i, p in enumerate(info["polygons"]):
+        #     # Get indexes of pixels inside the polygon and set them to 1
+        #     rr, cc = skimage.draw.polygon(p['all_points_y'], p['all_points_x'])
+        #     mask[rr, cc, i] = 1
+
+        # rect ((x1, y1), width, height)
+        for i, p in enumerate(info["shape_attributes"]):
             # Get indexes of pixels inside the polygon and set them to 1
-            rr, cc = skimage.draw.polygon(p['all_points_y'], p['all_points_x'])
+            # p['x']+p['height'],p['y']+p['width'])
+            rr, cc = skimage.draw.rectangle(start=(p['y'],p['x']), extent=(p['height'],p['width']), shape=mask.shape)
             mask[rr, cc, i] = 1
 
         # Return mask, and array of class IDs of each instance. Since we have
@@ -170,7 +190,7 @@ class BalloonDataset(utils.Dataset):
     def image_reference(self, image_id):
         """Return the path of the image."""
         info = self.image_info[image_id]
-        if info["source"] == "balloon":
+        if info["source"] == "custom":
             return info["path"]
         else:
             super(self.__class__, self).image_reference(image_id)
@@ -195,7 +215,7 @@ def train(model):
     print("Training network heads")
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,
-                epochs=30,
+                epochs=100,
                 layers='heads')
 
 
@@ -219,71 +239,117 @@ def color_splash(image, mask):
     return splash
 
 
-def detect_and_color_splash(model, image_path=None, video_path=None):
-    assert image_path or video_path
+def inference(model, image_path=None, video_path=None, config=None):
 
-    # Image or video?
-    if image_path:
-        # Run model detection and generate the color splash effect
-        print("Running on {}".format(args.image))
-        # Read image
-        image = skimage.io.imread(args.image)
-        # Detect objects
-        r = model.detect([image], verbose=1)[0]
-        # Color splash
-        splash = color_splash(image, r['masks'])
-        # Save output
-        file_name = "splash_{:%Y%m%dT%H%M%S}.png".format(datetime.datetime.now())
-        skimage.io.imsave(file_name, splash)
-    elif video_path:
-        import cv2
-        # Video capture
-        vcapture = cv2.VideoCapture(video_path)
-        width = int(vcapture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(vcapture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = vcapture.get(cv2.CAP_PROP_FPS)
 
-        # Define codec and create video writer
-        file_name = "splash_{:%Y%m%dT%H%M%S}.avi".format(datetime.datetime.now())
-        vwriter = cv2.VideoWriter(file_name,
-                                  cv2.VideoWriter_fourcc(*'MJPG'),
-                                  fps, (width, height))
+    test_dir = '/home/dl8/Desktop/workspace/khj/Mask_RCNN-master/datasets/custom/train'
+    img_paths = glob.glob(os.path.join(test_dir, '*.jpg'))
+    img_list = [cv2.imread(img_path) for img_path in img_paths]
 
-        count = 0
-        success = True
-        while success:
-            print("frame: ", count)
-            # Read next image
-            success, image = vcapture.read()
-            if success:
-                # OpenCV returns images as BGR, convert to RGB
-                image = image[..., ::-1]
-                # Detect objects
-                r = model.detect([image], verbose=0)[0]
-                # Color splash
-                splash = color_splash(image, r['masks'])
-                # RGB -> BGR to save image to video
-                splash = splash[..., ::-1]
-                # Add image to video writer
-                vwriter.write(splash)
-                count += 1
-        vwriter.release()
-    print("Saved to ", file_name)
+    save_dir = os.path.join(test_dir, 'inference')
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
+
+    for i, img in enumerate(img_list):
+        print(img_paths[i].split(test_dir+'/')[1])
+
+    start_idx = 0
+    while True:
+        T_start = time.time()
+
+        results = []
+        if (start_idx+config.IMAGES_PER_GPU) > (len(img_list) - 1):
+            end_idx = len(img_list) - 1
+        else:
+            end_idx = start_idx+config.IMAGES_PER_GPU
+
+        results = model.detect(img_list[start_idx:end_idx],
+                               batch_size=end_idx - start_idx,
+                               verbose=1)
+
+        print(config.IMAGES_PER_GPU)
+        print(len(img_list[0:config.IMAGES_PER_GPU]))
+
+
+        for i, r in enumerate(results):
+            visualize.display_results(img_list[start_idx + i], r['rois'], r['masks'], r['class_ids'], ['BG','Defect'], r['scores'],
+                                      save_dir=save_dir, img_name=img_paths[start_idx + i].split(test_dir+'/')[1],
+                                      display_img=False)
+
+        print('time:', (time.time()-T_start), 'len: ', config.IMAGES_PER_GPU)
+        print((time.time()-T_start) / config.IMAGES_PER_GPU )
+
+        if end_idx == len(img_list) - 1:
+            break
+        start_idx += config.IMAGES_PER_GPU
+
+
+# ############################################################
+# #  Detection
+# ############################################################
+#
+# def detect(model, dataset_dir, subset):
+#     """Run detection on images in the given directory."""
+#     print("Running on {}".format(dataset_dir))
+#
+#     # Create directory
+#     if not os.path.exists(RESULTS_DIR):
+#         os.makedirs(RESULTS_DIR)
+#     submit_dir = "submit_{:%Y%m%dT%H%M%S}".format(datetime.datetime.now())
+#     submit_dir = os.path.join(RESULTS_DIR, submit_dir)
+#     os.makedirs(submit_dir)
+#
+#     # Read dataset
+#     dataset = NucleusDataset()
+#     dataset.load_nucleus(dataset_dir, subset)
+#     dataset.prepare()
+#     # Load over images
+#     submission = []
+#     for image_id in dataset.image_ids:
+#         # Load image and run detection
+#         image = dataset.load_image(image_id)
+#         # Detect objects
+#         r = model.detect([image], verbose=0)[0]
+#         # Encode image to RLE. Returns a string of multiple lines
+#         source_id = dataset.image_info[image_id]["id"]
+#         rle = mask_to_rle(source_id, r["masks"], r["scores"])
+#         submission.append(rle)
+#         # Save image with masks
+#         visualize.display_instances(
+#             image, r['rois'], r['masks'], r['class_ids'],
+#             dataset.class_names, r['scores'],
+#             show_bbox=False, show_mask=False,
+#             title="Predictions")
+#         plt.savefig("{}/{}.png".format(submit_dir, dataset.image_info[image_id]["id"]))
+#
+#     # Save to csv file
+#     submission = "ImageId,EncodedPixels\n" + "\n".join(submission)
+#     file_path = os.path.join(submit_dir, "submit.csv")
+#     with open(file_path, "w") as f:
+#         f.write(submission)
+#     print("Saved to ", submit_dir)
 
 
 ############################################################
-#  Training
+#  Command Line
 ############################################################
 
 if __name__ == '__main__':
     import argparse
+
+    # train
+    # python3 balloon.py train --dataset="/home/dl8/Desktop/workspace/khj/Mask_RCNN-master/datasets/test" --weights="coco"
+    # python3 balloon.py train --dataset=/path/to/dataset --model=last
+
+    # splash
+
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         description='Train Mask R-CNN to detect balloons.')
     parser.add_argument("command",
                         metavar="<command>",
-                        help="'train' or 'splash'")
+                        help="'train' or 'inference'")
     parser.add_argument('--dataset', required=False,
                         metavar="/path/to/balloon/dataset/",
                         help='Directory of the Balloon dataset')
@@ -300,6 +366,10 @@ if __name__ == '__main__':
     parser.add_argument('--video', required=False,
                         metavar="path or URL to video",
                         help='Video to apply the color splash effect on')
+    parser.add_argument('--subset', required=False,
+                        metavar="Dataset sub-directory",
+                        help="Subset of dataset to run prediction on")
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -308,20 +378,19 @@ if __name__ == '__main__':
     elif args.command == "splash":
         assert args.image or args.video,\
                "Provide --image or --video to apply color splash"
+    elif args.command == "detect":
+        assert args.subset, "Provide --subset to run prediction on"
 
     print("Weights: ", args.weights)
     print("Dataset: ", args.dataset)
+    if args.subset:
+        print("Subset: ", args.subset)
     print("Logs: ", args.logs)
 
     # Configurations
     if args.command == "train":
         config = BalloonConfig()
     else:
-        class InferenceConfig(BalloonConfig):
-            # Set batch size to 1 since we'll be running inference on
-            # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
-            GPU_COUNT = 1
-            IMAGES_PER_GPU = 1
         config = InferenceConfig()
     config.display()
 
@@ -362,9 +431,10 @@ if __name__ == '__main__':
     # Train or evaluate
     if args.command == "train":
         train(model)
-    elif args.command == "splash":
-        detect_and_color_splash(model, image_path=args.image,
-                                video_path=args.video)
+    elif args.command == "inference":
+        inference(model, image_path=args.image,
+                                video_path=args.video,
+                                config=config)
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'splash'".format(args.command))
