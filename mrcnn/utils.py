@@ -341,6 +341,17 @@ class Dataset(object):
         assert info['source'] == source
         return info['id']
 
+    def append_data(self, class_info, image_info):
+        self.external_to_class_id = {}
+        for i, c in enumerate(self.class_info):
+            for ds, id in c["map"]:
+                self.external_to_class_id[ds + str(id)] = i
+
+        # Map external image IDs to internal ones.
+        self.external_to_image_id = {}
+        for i, info in enumerate(self.image_info):
+            self.external_to_image_id[info["ds"] + str(info["id"])] = i
+
     @property
     def image_ids(self):
         return self._image_ids
@@ -575,6 +586,18 @@ def unmold_mask(mask, bbox, image_shape):
     full_mask[y1:y2, x1:x2] = mask
     return full_mask
 
+def download_zipfile(zipname,url,dest_dir):
+    zip_file = zipname + '.zip'
+    if not os.path.isdir(os.path.join(dest_dir, zipname)):
+        print ("> {} not found. downloading it".format(zipname))
+        opener = urllib.request.URLopener()
+        opener.retrieve(url + zip_file, zip_file)
+        zipfile = ZipFile(zip_file)
+        zipfile.extractall(dest_dir)
+        zipfile.close()
+        os.remove(zip_file)
+    else:
+        print('> {} Found. Proceed.'.format(zipname))
 
 ############################################################
 #  Anchors

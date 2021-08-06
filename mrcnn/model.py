@@ -7,6 +7,7 @@ Licensed under the MIT License (see LICENSE for details)
 Written by Waleed Abdulla
 """
 
+import sys
 import os
 import random
 import datetime
@@ -16,6 +17,7 @@ import logging
 from collections import OrderedDict
 import multiprocessing
 import numpy as np
+import skimage.transform
 import tensorflow as tf
 import keras
 import keras.backend as K
@@ -25,15 +27,36 @@ import keras.models as KM
 
 from mrcnn import utils
 
+## MobileNetV1 Imports
+import keras.initializers as KI
+import keras.regularizers as KR
+import keras.constraints as KC
+from keras.utils import conv_utils
+from keras.engine import InputSpec
+
+# Root directory of the project
+ROOT_DIR = os.path.abspath("../")
+
+# Import Mask RCNN
+sys.path.append(ROOT_DIR)  # To find local version of the library
+
 # Requires TensorFlow 1.3+ and Keras 2.0.8+.
 from distutils.version import LooseVersion
 assert LooseVersion(tf.__version__) >= LooseVersion("1.3")
 assert LooseVersion(keras.__version__) >= LooseVersion('2.0.8')
 
 
+
 ############################################################
 #  Utility Functions
 ############################################################
+
+def fullmatch(regex, string, flags=0):
+    """Emulate python-3.4 re.fullmatch()."""
+#    return fullmatch("(?:" + regex + r")\Z", string, flags=flags)
+    m = re.match(regex, string, flags=flags)
+    if m and m.span()[1] == len(string):
+        return m
 
 def log(text, array=None):
     """Prints a text message. And, optionally, if a Numpy array is provided it
@@ -78,7 +101,9 @@ def compute_backbone_shapes(config, image_shape):
         return config.COMPUTE_BACKBONE_SHAPE(image_shape)
 
     # Currently supports ResNet only
-    assert config.BACKBONE in ["resnet50", "resnet101"]
+    #assert config.BACKBONE in ["resnet50", "resnet101"]
+    assert self.config.BACKBONE in ["resnet50", "resnet101", "mobilenetv1", "mobilenetv2"]
+
     return np.array(
         [[int(math.ceil(image_shape[0] / stride)),
             int(math.ceil(image_shape[1] / stride))]
@@ -2136,18 +2161,39 @@ class MaskRCNN():
         # Update the log directory
         self.set_log_dir(filepath)
 
-    def get_imagenet_weights(self):
+    def get_imagenet_weights(self, no_top=True):
         """Downloads ImageNet trained weights from Keras.
         Returns path to weights file.
         """
+        assert self.config.BACKBONE in ["resnet50","mobilenetv1"]
+
         from keras.utils.data_utils import get_file
-        TF_WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/'\
-                                 'releases/download/v0.2/'\
-                                 'resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5'
-        weights_path = get_file('resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5',
-                                TF_WEIGHTS_PATH_NO_TOP,
-                                cache_subdir='models',
-                                md5_hash='a268eb855778b3df3c7506639542a6af')
+        if no_top:
+            if self.config.BACKBONE == "resnet50":
+                TF_WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/'\
+                                         'releases/download/v0.2/'\
+                                         'resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5'
+                weights_path = get_file('resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5',
+                                        TF_WEIGHTS_PATH_NO_TOP,
+                                        cache_subdir='models',
+                                        md5_hash='a268eb855778b3df3c7506639542a6af')
+            elif self.config.BACKBONE == "mobilenetv1":
+                TF_WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/'\
+                                         'releases/download/v0.6/'\
+                                         'mobilenet_1_0_224_tf_no_top.h5'
+                weights_path = get_file('mobilenet_1_0_224_tf_no_top.h5',
+                                        TF_WEIGHTS_PATH_NO_TOP,
+                                        cache_subdir='models',
+                                        md5_hash='725ccbd03d61d7ced5b5c4cd17e7d527')
+        else:
+            if self.config.BACKBONE == "mobilenetv1":
+                TF_WEIGHTS_PATH  = 'https://github.com/fchollet/deep-learning-models/'\
+                                         'releases/download/v0.6/'\
+                                         'mobilenet_1_0_224_tf.h5'
+                weights_path = get_file('mobilenet_1_0_224_tf.h5',
+                                        TF_WEIGHTS_PATH,
+                                        cache_subdir='models',
+                                        md5_hash='03394917f9a9ea3362f46332a5b6a215')
         return weights_path
 
     def compile(self, learning_rate, momentum):

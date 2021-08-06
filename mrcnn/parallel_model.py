@@ -18,6 +18,14 @@ import keras.backend as K
 import keras.layers as KL
 import keras.models as KM
 
+import sys
+import os
+# Root directory of the project
+ROOT_DIR = os.path.abspath("../")
+
+# Import Mask RCNN
+sys.path.append(ROOT_DIR)  # To find local version of the library
+from mrcnn import utils
 
 class ParallelModel(KM.Model):
     """Subclasses the standard Keras Model and adds multi-GPU support.
@@ -34,6 +42,7 @@ class ParallelModel(KM.Model):
         """
         self.inner_model = keras_model
         self.gpu_count = gpu_count
+        utils.set_cuda_visible_devices(self.gpu_count)
         merged_outputs = self.make_parallel()
         super(ParallelModel, self).__init__(inputs=self.inner_model.inputs,
                                             outputs=merged_outputs)
