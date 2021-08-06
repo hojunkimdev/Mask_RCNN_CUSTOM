@@ -1,0 +1,35 @@
+{
+  "exp": {
+    "mode": "train",
+       "help_mode": "'train' or 'test'"
+  },
+  "dataset": {
+      "root": "datasets/custom",
+      "train": "train",
+      "val": "val",
+      "test": "test",
+      "img_extension": "jpg",
+      "mask": "polygon",
+           "help_mode": "'polygon' or 'rect'"
+  },
+  "train": {
+    "model": {
+      "save_path": "logs",
+      "pre_weight": "imagenet",
+            "help_pre_weight": "Path to pre-weights or 'last' or 'coco' or 'imagenet'",
+      "backbone": "mobilenetv1",
+            "help_backbone": ["resnet50", "resnet101", "mobilenetv1", "mobilenetv2"],
+      "epoch": 100,
+      "batch_size": 1
+    },
+    "method": "normal",
+            "help_mode": "'normal' or 'special'"
+  },
+  "test": {
+    "model": {
+      "weight_path": "/home/dl8/Desktop/workspace/khj/Mask_RCNN-master/logs/custom20191119T1745/mask_rcnn_custom_0029.h5",
+      "backbone": "mobilenetv1",
+      "batch_size": 8
+    }
+  }
+}
